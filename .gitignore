@@ -1,0 +1,6 @@
+# 공개 repo에는 보드(index.html + weekend-board.html)만 올린다.
+# 나머지(역설계 노트·플랜·임시 파일)는 전부 제외.
+*
+!.gitignore
+!index.html
+!weekend-board.html
