@@ -303,6 +303,7 @@
   const cls=v=> v>1e-4?'up-c': v<-1e-4?'down-c':'flat-c';
   const arr=v=> v>1e-4?'▲': v<-1e-4?'▼':'■';
   const j=r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); };
+  const fetchJSON=(url,ms)=>{ const c=new AbortController(), t=setTimeout(()=>c.abort(),ms||12000); return fetch(url,{cache:'no-store',signal:c.signal}).then(j).finally(()=>clearTimeout(t)); };
   const abbr=n=>{ if(n==null)return '—'; n=+n; if(n>=1e9)return f1.format(n/1e9)+'B'; if(n>=1e6)return f1.format(n/1e6)+'M'; if(n>=1e3)return f1.format(n/1e3)+'K'; return f0.format(n);};
   const nowHM=()=>new Intl.DateTimeFormat('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'Asia/Seoul'}).format(new Date());
   function setSrc(id,s){ const e=$(id); e.classList.remove('bad','wait'); if(s!=='ok')e.classList.add(s); }
@@ -463,12 +464,12 @@
   async function pullUpbitCandles(coin){
     const base=upbitCandlePath(TF), mkt=UPBIT_MKT[coin];
     try{
-      const p1=await fetch(base+'?market='+mkt+'&count=200',{cache:'no-store'}).then(j);
+      const p1=await fetchJSON(base+'?market='+mkt+'&count=200',12000);
       let merged=normU(p1).reverse();                                   // newest-first -> ascending
       const oldest=p1[p1.length-1];                                     // oldest of page1
       if(oldest && oldest.candle_date_time_kst){
         try{ const to=encodeURIComponent(oldest.candle_date_time_kst+'+09:00');
-          const p2=await fetch(base+'?market='+mkt+'&count=200&to='+to,{cache:'no-store'}).then(j);
+          const p2=await fetchJSON(base+'?market='+mkt+'&count=200&to='+to,12000);
           const a2=normU(p2).reverse(), cut=merged.length?merged[0].t:Infinity;
           merged=a2.filter(k=>k.t<cut).concat(merged);                 // older block + page1, dedup by ts
         }catch(e){}
@@ -503,16 +504,25 @@
   }
 
   async function pullCrypto(){
-    const [upT,binT]=await Promise.allSettled([
-      fetch(UPBIT_TICK+'?markets=KRW-BTC,KRW-ETH',{cache:'no-store'}).then(j),
-      fetch(BINANCE_TICK+'?symbols='+encodeURIComponent('["BTCUSDT","ETHUSDT"]'),{cache:'no-store'}).then(j)
-    ]);
-    if(binT.status==='fulfilled' && Array.isArray(binT.value)){ const bm={}; for(const x of binT.value) bm[x.symbol]=+x.price;
-      if(isFinite(bm[BIN_SYM.btc])) binPrice.btc=bm[BIN_SYM.btc]; if(isFinite(bm[BIN_SYM.eth])) binPrice.eth=bm[BIN_SYM.eth]; setSrc('#src-binance','ok'); }
-    else setSrc('#src-binance','bad');
-    if(upT.status==='fulfilled' && Array.isArray(upT.value)){ setSrc('#src-upbit','ok'); const um={}; for(const x of upT.value) um[x.market]=x;
-      renderCrypto('btc', um['KRW-BTC']); renderCrypto('eth', um['KRW-ETH']); }
-    else { setSrc('#src-upbit','bad'); failTile(tiles.btc,'btc'); failTile(tiles.eth,'eth'); }
+    // Binance (괄호 가격) — 논블로킹: 차단/지연돼도 Upbit 타일을 막지 않음
+    fetchJSON(BINANCE_TICK+'?symbols='+encodeURIComponent('["BTCUSDT","ETHUSDT"]'),9000).then(arr=>{
+      if(Array.isArray(arr)){ const bm={}; for(const x of arr) bm[x.symbol]=+x.price;
+        if(isFinite(bm[BIN_SYM.btc])) binPrice.btc=bm[BIN_SYM.btc]; if(isFinite(bm[BIN_SYM.eth])) binPrice.eth=bm[BIN_SYM.eth];
+        setSrc('#src-binance','ok'); ['btc','eth'].forEach(c=>{ if(lastUp[c]) renderCrypto(c,lastUp[c]); }); }
+      else setSrc('#src-binance','bad');
+    }).catch(()=>setSrc('#src-binance','bad'));
+    // Upbit 티커 (메인) — 타일을 구동
+    try{
+      const arr=await fetchJSON(UPBIT_TICK+'?markets=KRW-BTC,KRW-ETH',12000);
+      if(!Array.isArray(arr)) throw new Error('형식 오류');
+      setSrc('#src-upbit','ok'); const um={}; for(const x of arr) um[x.market]=x;
+      renderCrypto('btc', um['KRW-BTC']); renderCrypto('eth', um['KRW-ETH']);
+    }catch(e){ setSrc('#src-upbit','bad');
+      const why = (e&&e.name==='AbortError') ? '시간초과' : (e&&e.message) ? e.message : '네트워크';
+      const msg = 'Upbit 실패: '+why+' (이 망에서 거래소 차단?)';
+      failTile(tiles.btc,'btc',msg); failTile(tiles.eth,'eth',msg);
+    }
+    // Upbit 캔들 (차트) — 독립
     await Promise.allSettled([ pullUpbitCandles('btc'), pullUpbitCandles('eth') ]);
   }
 
