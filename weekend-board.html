@@ -294,6 +294,8 @@
   const prevRaw={};
   const binPrice={ btc:null, eth:null };
   const lastUp={ btc:null, eth:null };
+  const deepCache={ btc:[], eth:[] };   // Upbit 오래된 캔들(MA200용) — 1회만 받아 캐시(매 사이클 X, 캔들 rate-limit 보호)
+  let deepTF=null;
   let TF='1h', fx=null, lastRef=0, koruBase=null, ewyBase=null, koruEst=null, manualIG=null, showMA=true;
 
   const nf=d=>new Intl.NumberFormat('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -304,6 +306,7 @@
   const arr=v=> v>1e-4?'▲': v<-1e-4?'▼':'■';
   const j=r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); };
   const fetchJSON=(url,ms)=>{ const c=new AbortController(), t=setTimeout(()=>c.abort(),ms||12000); return fetch(url,{cache:'no-store',signal:c.signal}).then(j).finally(()=>clearTimeout(t)); };
+  const delay=ms=>new Promise(r=>setTimeout(r,ms));
   const abbr=n=>{ if(n==null)return '—'; n=+n; if(n>=1e9)return f1.format(n/1e9)+'B'; if(n>=1e6)return f1.format(n/1e6)+'M'; if(n>=1e3)return f1.format(n/1e3)+'K'; return f0.format(n);};
   const nowHM=()=>new Intl.DateTimeFormat('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'Asia/Seoul'}).format(new Date());
   function setSrc(id,s){ const e=$(id); e.classList.remove('bad','wait'); if(s!=='ok')e.classList.add(s); }
@@ -463,19 +466,25 @@
 
   async function pullUpbitCandles(coin){
     const base=upbitCandlePath(TF), mkt=UPBIT_MKT[coin];
+    if(deepTF!==TF){ deepCache.btc=[]; deepCache.eth=[]; deepTF=TF; }   // TF 바뀌면 deep 히스토리 재구축
+    let recent;
     try{
-      const p1=await fetchJSON(base+'?market='+mkt+'&count=200',12000);
-      let merged=normU(p1).reverse();                                   // newest-first -> ascending
-      const oldest=p1[p1.length-1];                                     // oldest of page1
-      if(oldest && oldest.candle_date_time_kst){
-        try{ const to=encodeURIComponent(oldest.candle_date_time_kst+'+09:00');
+      const p1=await fetchJSON(base+'?market='+mkt+'&count=200',12000); // 최근 200개 (매 사이클)
+      recent=normU(p1).reverse();                                       // newest-first -> ascending
+      if(recent.length<2) return;
+      // 오래된 200개(MA200용) — 없을 때만, 간격 두고 1회 (캔들 초당 rate-limit 보호). 실패 시 다음 사이클 재시도
+      if(!deepCache[coin].length){
+        try{ await delay(500);
+          const oldest=p1[p1.length-1];
+          const to=encodeURIComponent(oldest.candle_date_time_kst+'+09:00');
           const p2=await fetchJSON(base+'?market='+mkt+'&count=200&to='+to,12000);
-          const a2=normU(p2).reverse(), cut=merged.length?merged[0].t:Infinity;
-          merged=a2.filter(k=>k.t<cut).concat(merged);                 // older block + page1, dedup by ts
-        }catch(e){}
+          deepCache[coin]=normU(p2).reverse();
+        }catch(e){ /* deep 미확보 — recent만으로 차트는 정상 표시, 다음 사이클 재시도 */ }
       }
-      if(merged.length>=2){ cache[coin]=merged; drawTile(coin); }
-    }catch(e){ /* keep previous candles; price already rendered by renderCrypto */ }
+    }catch(e){ return; /* 최근 캔들 실패(rate limit/네트워크) — 기존 차트 유지, 다음 사이클 재시도 */ }
+    const deep=deepCache[coin]||[], cut=recent[0].t;
+    cache[coin]=deep.filter(k=>k.t<cut).concat(recent);                 // deep(오래된) + recent, ts로 dedup
+    drawTile(coin);
   }
 
   function setCryptoSub(coin){
@@ -522,8 +531,11 @@
       const msg = 'Upbit 실패: '+why+' (이 망에서 거래소 차단?)';
       failTile(tiles.btc,'btc',msg); failTile(tiles.eth,'eth',msg);
     }
-    // Upbit 캔들 (차트) — 독립
-    await Promise.allSettled([ pullUpbitCandles('btc'), pullUpbitCandles('eth') ]);
+    // Upbit 캔들 (차트) — 캔들 초당 rate-limit이 빡빡 → ticker와 분리 + 직렬·간격 호출(429 방지)
+    await delay(400);
+    await pullUpbitCandles('btc');
+    await delay(500);
+    await pullUpbitCandles('eth');
   }
 
   // ---------- wealthtalk Socket.IO over raw WebSocket ----------
